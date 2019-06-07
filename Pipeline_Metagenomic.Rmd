@@ -1,0 +1,141 @@
+---
+title: "Pipeline_Metagenomic"
+author: "Roxanne Giguère-Tremblay, Arthur de Grandpré, Genevieve Laperriere"
+date: "3 juin 2019"
+output: html_document
+---
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(eval = FALSE)
+```
+
+# Introduction
+Ce pipeline pour le 16S des bactéries a été adapté à mes données via les deux sites suivants : https://benjjneb.github.io/dada2/tutorial.html AND https://benjjneb.github.io/dada2/bigdata.html
+
+Je fais ce projet R afin de pouvoir attitrer une taxonomie à mes échantillons de Métagénomique (Illumina MiSeq) ayant été échantillonnés dans 165 forêts boréales (Abitibi-témiscamingue et La Tuque en Haute-Mauricie).
+
+Puisque c'est une très grosse base de donnée, j'ai due effectuée des aller-retour entre le programme Galaxy et RStudio (DADA2) pour les analyses. 
+
+```{r Resert RStudio & Téléchargement DADA2, warning=F, message=F}
+rm(list=ls())
+library(dada2)
+
+```
+
+# Étape 1 : Filtrer et trimer les échantillons R1 et R2. (Étape 2 dans le protocole avec Galaxy+RStudio)
+
+Cette étape va permettre de créer des échantillons coupés et filtrés. Un nouveau dossier sera aussi créer. 
+*Les variables à mettre dans le code sont sujet à changement selon les échantillons et si on veut être très stricte ou moins.
+
+```{r Téléchargement des données brutes}
+path <- "E:/projets/CNETE/brut" # CHANGE ME to the directory containing the fastq files
+list.files(path)
+```
+
+
+Le code suivant permet de faire une liste qui va "matcher" les fichiers fastq Forward et Reverse selon les numéros de sites.
+Les noms des fichiers a comme format : NUMERO_R1.fastq ET NUMERO_R2.fastq. 
+On demande donc au code de repérer le "pattern" _R1 pour la Forward (fnFs) et _R2 pour la Reverse (fsRs). Et on va sortir les numéros d'échantillons avec le code suivant. 
+```{r Pattern}
+fnFs <- sort(list.files(path, pattern="_R1.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="_R2.fastq", full.names = TRUE))
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+head(sample.names)
+```
+
+On peut aussi regarder les FASTQC Quality Report (Juste le 1er graphique que l'on voit dans Galaxy) directement ici. Cela n'est pas nécessaire cependant de l'ajouter dans le code. C'est plutôt une vérification pour voir que nos échantillons aient bien été téléchargés. 
+```{r Quality Report}
+plotQualityProfile(fnFs[1:2])
+plotQualityProfile(fnRs[1:2])
+```
+
+On arrive enfin au titre de la section : Filtrer et Couper ! 
+Les premières lignes c'est tout simplement pour dire a quel endroit envoyer les fichiers lorsqu'ils sont traités et sous quels noms on veut qu'ils soit enregistrer. 
+La 3e ligne c'est là qu'on met nos différentes variables que l'on a sorti des observations effectuées dans Galaxy. La sortie de "head" va montrer le nombre de séquences qu'il y avait au début et ce qu'il y a maintenant. Si on en perd plus de la moitier c'est qu'on a été trop sévère dans nos paramètres. Il faudra donc réajuster et relancer le code. 
+* Sur Windows, il vaut mieux multithread=FALSE. 
+```{r Filt & Trim}
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+
+
+out <- filterAndTrim(fwd=fnFs, filt=filtFs, rev=fnRs, filt.rev=filtRs, trimLeft=c(20,15), truncLen=c(285,230),
+                     maxN=0, maxEE=c(2,2), minLen = 210, compress = TRUE, multithread=FALSE)
+head(out)
+```
+
+À la suite de cette étape, il est possible de vérifier que nos séquences aient bel et bien été couper aux endroits ou la qualité diminue. Il s'agit simplement d'aller chercher dans le dossier ou les fichiers précédents ont été enregistrer et de refaire les étapes précédente pour reproduire un Quality Report. 
+```{r Vérifications}
+verif <- "E:/projets/CNETE/brut/filtered"
+Fs <- sort(list.files(verif, pattern="_F_filt.fastq", full.names = TRUE)) 
+Rs <- sort(list.files(verif, pattern="_R_filt.fastq", full.names = TRUE)) 
+sample.names <- sapply(strsplit(basename(Fs), "_f"), `[`, 1)
+head(sample.names)
+
+plotQualityProfile(Fs[1:2])
+plotQualityProfile(Rs[1:2])
+```
+
+# Étape 2 : Déréplication, Retrait des chimères et assignation taxonomique (4 du protocole)
+
+C'est encore une étape de "filtration/purification" des séquences. Cette étape s'effectue cependant avec les séquences ayant été Merger (Avec Galaxy). 
+```{r Téléchargement des données assemblées}
+filtpath <- "E:/projets/CNETE/brut/filtered/merged" 
+filts <- list.files(filtpath, pattern="fastq", full.names=TRUE)
+sample.names <- sapply(strsplit(basename(filts), "_"), `[`, 1) 
+names(filts) <- sample.names
+```
+
+## Apprendre l'erreur dans les données 
+```{r}
+set.seed(100)
+err <- learnErrors(filts, multithread=FALSE, randomize=TRUE)
+```
+
+## Déréplication des séquences 
+```{r}
+dds <- vector("list", length(sample.names))
+names(dds) <- sample.names
+for(sam in sample.names) {
+  cat("Processing:", sam, "\n")
+  derep <- derepFastq(filts[[sam]])
+  dds[[sam]] <- dada(derep, err=err, multithread=FALSE)
+}
+```
+
+Inscrire les sortie de cette boucle dans un fichier, car étant donnée que c'est une étape assez longue à réaliser, on ne veut pas toujours être obligé de repartir avant la boucle si on doit quitter la session R. 
+```{r}
+seqtab <- makeSequenceTable(dds)
+saveRDS(seqtab, "E:/projets/CNETE/brut/filtered/merged/seqtab.rds")
+```
+
+## Retrait des chimères 
+Tout comme précédemment, il vaut mieux enregistrer directement le fichier de sorti suite à cette étape. 
+```{r}
+Seqtab <- removeBimeraDenovo(seqtab, method="consensus", multithread=FALSE)
+saveRDS(Seqtab, "E:/projets/CNETE/brut/filtered/merged/Seqtab.rds")
+```
+
+
+## Assignation taxonomique 
+
+Ici je vais vous fournir la base de donnée public que nous avons utiliser pour faire mon assignation. DADA2 ne la lisait pas correctement il a fallu faire du code BASH afin de la rendre lisible par R. Cette étape prend beaucoup de temps à faire. Un minimum de 25 Go de RAM est recommander (vu sur internet), mais plus c'est mieux (selon moi). 
+Le paramètre "minBoot" est mis de base a 50, mais j'avais lu sur les Forum R que le mettre a 80 était une façon d'être plus certains que la taxonomie qui a été assigner soit la bonne. 
+(Lorsque sur 100 boucles 80 fois c'est la même taxonomie qui sort, le pogramme l'accepte et c'est ce qu'on obtient dans nos tableau. Si c'est inférieur à 80, ça va tenter de le faire avec la famille, la classe, l'ordre... etc)
+*https://benjjneb.github.io/dada2/assign.html
+```{r}
+Seqtab <- readRDS("Data/Raw/FASTQ/filtered/seqtab_final.rds")
+sq = getSequences(Seqtab)
+TAXO = assignTaxonomy(sq, minBoot = 80, 'D:/projets/Taxo_bacteria/Data/Raw/translated.fasta.', multithread = TRUE)
+saveRDS(TAXO, "D:/projets/CNETE/filtered/taxo_final.rds")
+```
+```{r Obtention du tableau voulu}
+seqtab2 = t(Seqtab)
+TAXO=merge(seqtab2,TAXO,by="row.names", all.x=TRUE)
+
+saveRDS(TAXO, "D:/projets/CNETE/filtered/taxo_final.rds")
+write.csv(TAXO, "D:/projets/CNETE/filtered/taxo_final.csv")
+
+```
+
+
